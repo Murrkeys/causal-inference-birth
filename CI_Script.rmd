@@ -1,0 +1,146 @@
+---
+layout: "post"
+title: "Effect of Age on Preterm Birth : A Causal Inference Approach"
+categories: "[R,Statistics]"
+
+output:
+  md_document:
+    variant: markdown_github
+    preserve_yaml: true
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning=FALSE,message=FALSE,fig.width=10, fig.height=6)
+library(ggdag)
+library(dagitty)
+library(ggplot2)
+library(MatchIt)
+library(readr)
+```
+
+```{r data, include=FALSE}
+child <- read_csv('Data/ncs_child_mom_matching.csv')
+
+#look at first few rows of data
+#head(child)
+
+#summary statistics
+#summary(child)
+
+#create outcome variable for preterm birth (gestational_age = 1,2,3)
+
+child$preterm_birth <- ifelse(child$gestational_age <=3,1,0)
+child$young_mom <- ifelse(child$mom_age <=19,1,0)
+```
+### Introduction
+
+Young maternal age is associated with adverse pregnancy outcomes, including low birthweight and preterm birth. However, arguments have been made that young maternal age is not actually causing these outcomes.  Instead, other socio-economic factors associated with young maternal age actually lead to these adverse outcomes.
+
+In this post, I will explore the causal relationships further to hopefully shed light on the question above.  I will utilize data that incorporates maternal and family demographics, as well as child birth outcomes. The data is from the National Children’s Study Archive. The National Children’s Study (NCS) collected birth and early childhood data on more than 5,000 children and their families in the USA from 2009-2014.
+
+### Directed Acyclic Graphs
+
+Directed Acyclic Graphs (DAGs) are used by epidemiologists to help determine the unbiased estimate of effect of an exposure on an outcome.  In other words, DAGs are used to make causal inferences about the exposure. To create a DAG, a researcher visualizes their assumptions about the causal relationships between variables present in the data.  Once the causal structure present in the data is visualized in a DAG, it is easier to explore confounding relationships and properly control on certain variables in order to make causal inferences about the exposure of interest. If you are interested in more information about DAGs and causal relationships, this [resource](https://cran.r-project.org/web/packages/ggdag/vignettes/intro-to-dags.html) might be helpful. 
+
+In this case, I am interested in estimating the effect of young maternal age on preterm birth.  I include a number of socio-economic factors and maternal demographics to complete the analysis. Below, the DAG for this analysis is pictured. Note, I am not working with any subject matter experts on this post so many of my assumptions might be inaccurate.  
+
+
+``` {r dag, echo=FALSE}
+#create dag object with nodes and relationships
+dag  <- dagify(preterm_birth ~ bmi + diabetes + anemia + cig_now + young_mom,
+  bmi ~ diabetes + anemia + cig_now + mom_race + mom_ethnicity + household_income + mom_education + young_mom,
+  diabetes ~ bmi + anemia + cig_now + mom_race + mom_ethnicity + household_income + mom_education + young_mom,
+  anemia ~ bmi + diabetes + cig_now + mom_race + mom_ethnicity + household_income + mom_education + young_mom,
+  cig_now ~ mom_race + mom_ethnicity + household_income + mom_education,
+  mom_age ~ mom_maristat + mom_education + household_income + mom_race + mom_ethnicity,
+  household_income ~ mom_race + mom_education + mom_ethnicity,
+  mom_education ~ mom_race + mom_education + household_income,
+  labels = c("preterm_birth" = "Preterm Birth", 
+                  "bmi" = "BMI",
+                  "diabetes" = "Diabetes",
+                  "anemia" = "Anemia",
+                  "cig_now" = "Current Smoker",
+                  "young_mom" = "Young Mother",
+                  "mom_race" = "Race of Mom",
+                  "mom_ethnicity" = "Ethnicity of Mom",
+                  "mom_education" = "Education Level of Mom",
+                  "household_income" = "Household Income",
+                  "mom_maristat" = "Married Status of Mom"),
+       exposure = "young_mom",
+       outcome = "preterm_birth"
+  )
+#create dag plot object using the labels and dag theme
+temp_dag <- ggdag_status(dag,text=FALSE,use_labels="label") + theme_dag_blank()
+#display the dag plot
+temp_dag
+```
+
+The DAG is very busy, but it can be useful to map paths between exposure and outcome.  For this analysis, I am interested in controlling for "backdoor" paths. These are variables that affect both the exposure (_Young Mother_) and outcome (_PreTerm Birth_).  I observe a few backdoor paths:
+
+* Young Mother <-- Race of Mom --> (BMI,Diabetes,Anemia,Current Smoker) --> PreTerm Birth
+
+* Young Mother <-- Education Level of Mom --> (BMI,Diabetes,Anemia,Current Smoker) --> PreTerm Birth
+
+* Young Mother <-- Household Income --> (BMI,Diabetes,Anemia,Current Smoker) --> PreTerm Birth
+
+* Young Mother <-- Ethnicity of Mom --> (BMI,Diabetes,Anemia,Current Smoker) --> PreTerm Birth
+
+From above, Race, Education Level, Ethnicity, and Household income will need to be controlled for in order to properly make causual inferences about the effect of young maternal age on preterm birth. There are a variety ways to do this, but I will explain the matching method below. 
+
+### Matching
+
+In a perfect world, randomized-control trials (RCTs) are used to explore unbiased estimates of exposure effects.  RCTs lead to unbiased estimates by randomly assigning subjects to either the control or exposure group, thus limited the bias present in the subject's backgrounds and characteristics.  RCTs are not always perfect, but if proper techniques are used to choose the sample and assign to the groups, they are the gold standard of clinical research.  
+
+However, RCTs can be difficult and sometimes impossible to implement in real life.  In this example, there is simply no way to create a RCT where some mothers give birth early and some mothers give birth later in the proper way.  So, what to do? Enter Matching!
+
+Matching is a technique that balances certain characteristics in the groups of interest (control vs exposure) to limit the confounding effect of these variables on the exposure and outcome.  There are a variety of methods to perform matching, but the details are out of scope for this post. At its core, matching algorithms seek to find a similar control subject for every exposure subject.  Similar here is defined by the researcher.  In this case, I want to control for race, education level, ethnicity, and household income.  Therefore, for every young mother, I want to find a normal mother with similar race, education level, ethnicity, and household income characteristics.  
+
+Below, you can observe the difference in the means between the treated and control groups for all the data, and for the matched data. You also can see the propensity score distribution for the raw data and matched data. Here, the propensity score reflects the matching method used.  As you can see, the matched data's background characteristics are more balanced when compared to the raw data. This can be observed in the identical means and near identical distributions of propensity scores. 
+
+``` {r match, echo=FALSE}
+#create matched dataset using the propensity score
+
+#match on variables defined in question one
+match <- matchit(young_mom ~ mom_race + mom_education + household_income + mom_ethnicity, data=child,
+                  method = "nearest", distance = "logit", ratio=1, discard = "none")
+#print the summary of the matched data to assess balance
+summary(match)
+#print out visuals of matched data
+hist_match <- plot(match,type="hist")
+hist_match
+```
+### Estimating the Effect
+
+Now, I can utilize the matched dataset to create a simple logistic regression model to estimate the effect of young maternal age on preterm birth.  By comparing this model to the same model using all the data, I can observe the differences and make conclusions about the unbiased exposure effect on the outcome.  
+
+
+``` {r model, include = FALSE}
+#save the matched data
+match_data <- match.data(match)
+
+#fit data to both raw and matched data
+
+mod_raw <- glm(preterm_birth ~ young_mom, family = binomial,data=child)  
+
+mod_match <- glm(preterm_birth ~ young_mom, family = binomial,data=match_data)
+
+#model output
+#summary(mod_raw)
+#summary(mod_match)
+```
+
+Below, the output for the raw model is displayed. Note here that young maternal age is a significant predictor of preterm birth, and has a positive assocation.
+
+
+```{r raw_output, echo=FALSE}
+summary(mod_raw)
+```
+Below, the output for the matched model is displayed. Note here that now the young maternal age is not a significant predictor of preterm birth, and has no association. 
+```{r match_output, echo=FALSE}
+summary(mod_match)
+```
+When controlling for socio-economic factors, young maternal age becomes an insignificant predictor of preterm birth. In this case, other external factors play a more significant factor in causing preterm birth. When using the matching method to properly control for confounding variables, a more unbiased estimate of the effect of young maternal age on preterm birth was able to quantified. 
+
+### Summary
+
+Casual inference is an important tool for a health data scientist to have in their toolkit.  It is clear to see how improper techniques can lead to incorrect conclusions from the above example. In this post, I highlighted a few techniques that data scientists, especially in healthcare, can utilize to properly explore the casual relationships in their data. Please keep an eye out for further posts on this subject in the future. And as always, reach out if you have any questions! 
